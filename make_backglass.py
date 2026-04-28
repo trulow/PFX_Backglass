@@ -3,8 +3,8 @@
 Pinball FX Backglass Generator
 ==============================
 
-Takes the template at Template/1.Table.png and composites each PNG in src/
-beneath it, writing finished backglass images to modified/.
+Takes the template at Template/1.Table.png and composites each PNG or JPG in
+src/ beneath it, writing finished backglass images to modified/.
 
 The script asks at startup for two choices:
 
@@ -29,9 +29,39 @@ Re-running is safe; existing files in modified/ are overwritten.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
-from PIL import Image
+
+# ---------------------------------------------------------------------------
+# Pillow availability check — offer to install if missing
+# ---------------------------------------------------------------------------
+try:
+    from PIL import Image
+except ImportError:
+    print("Pillow is not installed, but it is required to run this script.")
+    try:
+        answer = input("Install it now via pip? [Y/n]: ").strip().lower()
+    except EOFError:
+        answer = "y"
+    if answer in ("", "y", "yes"):
+        print("Installing Pillow...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "Pillow"],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                "Pillow installation failed. "
+                "Please run:  pip install Pillow  and try again."
+            )
+        # Re-import after installation
+        from PIL import Image  # noqa: PLC0415
+        print("Pillow installed successfully.\n")
+    else:
+        raise SystemExit(
+            "Pillow is required. Install it with:  pip install Pillow"
+        )
 
 # --- paths -------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +75,9 @@ OUT_DIR = ROOT / "modified"
 NATIVE_CANVAS = (1920, 1080)        # template's native size
 NATIVE_BOX = (0, 0, 1920, 878)      # left, top, right, bottom of artwork area
 BACKGROUND_COLOR = (0, 0, 0, 255)   # behind any letterbox bars
+
+# Source file extensions that are accepted
+SRC_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg")
 
 # Map user-facing fit-mode names -> internal mode used by fit_image()
 MODE_ALIASES = {
@@ -105,7 +138,7 @@ def prompt_output_size() -> tuple[int, int]:
 def parse_args(argv: list[str]) -> tuple[str | None, tuple[int, int] | None]:
     """Read CLI flags. Each value is None if the user should be prompted."""
     parser = argparse.ArgumentParser(
-        description="Composite src/*.png with the backglass template into modified/.",
+        description="Composite src/*.png and src/*.jpg with the backglass template into modified/.",
         add_help=True,
     )
 
@@ -127,6 +160,34 @@ def parse_args(argv: list[str]) -> tuple[str | None, tuple[int, int] | None]:
 
     args = parser.parse_args(argv)
     return args.mode, args.size
+
+
+def collect_sources(src_dir: Path) -> list[Path]:
+    """Return a sorted, deduplicated list of PNG and JPG files in src_dir.
+
+    If a stem appears as both .jpg/.jpeg and .png, the PNG takes priority and
+    the JPG is skipped (with a warning), to avoid output filename collisions.
+    """
+    seen: dict[str, Path] = {}
+    all_files: list[Path] = []
+    for pattern in SRC_EXTENSIONS:
+        all_files.extend(src_dir.glob(pattern))
+
+    for path in sorted(all_files):
+        stem = path.stem.lower()
+        if stem in seen:
+            existing = seen[stem]
+            # PNG wins; warn and skip the other
+            if existing.suffix.lower() == ".png":
+                print(f"  SKIP {path.name}  (conflicts with {existing.name}; PNG takes priority)")
+                continue
+            else:
+                print(f"  SKIP {existing.name}  (conflicts with {path.name}; PNG takes priority)")
+                seen[stem] = path
+        else:
+            seen[stem] = path
+
+    return sorted(seen.values())
 
 
 def fit_image(img: Image.Image, box_w: int, box_h: int, mode: str) -> Image.Image:
@@ -178,7 +239,7 @@ def build_backglass(
     canvas_size: tuple[int, int],
     box: tuple[int, int, int, int],
 ) -> Image.Image:
-    """Composite a single source PNG with the template at the requested size."""
+    """Composite a single source image (PNG or JPG) with the template."""
     src = Image.open(source_path)
     box_l, box_t, box_r, box_b = box
     box_w, box_h = box_r - box_l, box_b - box_t
@@ -227,14 +288,15 @@ def main(argv: list[str] | None = None) -> None:
     scale_y = size[1] / NATIVE_CANVAS[1]
     box = scale_box(NATIVE_BOX, scale_x, scale_y)
 
-    sources = sorted(p for p in SRC_DIR.glob("*.png") if p.is_file())
+    sources = collect_sources(SRC_DIR)
     if not sources:
-        print(f"No PNGs found in {SRC_DIR}")
+        print(f"No PNG or JPG files found in {SRC_DIR}")
         return
 
     print(f"Processing {len(sources)} file(s) -> {OUT_DIR}")
     for src_path in sources:
-        out_path = OUT_DIR / src_path.name
+        # Always write output as PNG regardless of input format
+        out_path = OUT_DIR / (src_path.stem + ".png")
         try:
             result = build_backglass(src_path, template, mode, size, box)
             result.save(out_path, "PNG")
